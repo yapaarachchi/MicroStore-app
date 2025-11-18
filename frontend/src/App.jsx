@@ -573,7 +573,7 @@ export default function App() {
           <div className="flex items-center space-x-6">
             <div className="flex items-center space-x-2 bg-slate-800 px-3 py-1 rounded-full">
               {user.role === 'Admin' ? <Shield size={16} className="text-yellow-400" /> : <User size={16} className="text-green-400" />}
-              <span className="text-sm font-medium capitalize">{user.name || 'User'}</span>
+              <span className="text-sm font-medium capitalize text-black">{user.name || 'User'}</span>
             </div>
             <button 
               onClick={handleLogout} 
