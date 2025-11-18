@@ -11,7 +11,7 @@ Event-driven supermarket demo that showcases an inventory microservice, a billin
 - `billing_service` (FastAPI)  
   Consumes Kafka events, persists invoices, and exposes historical billing data.
 - `frontend` (React + Vite)  
-  Single-page dashboard for admins/cashiers to manage stock and review invoices.
+  Single-page dashboard for admins/cashiers to manage stock, review invoices, and seed demo data (admin-only).
 - Infrastructure: PostgreSQL (two databases), Kafka + Zookeeper, Kafka UI, all managed by Docker Compose.
 
 ```
@@ -133,7 +133,20 @@ The app expects the APIs at `http://localhost:8000` and `http://localhost:8001`.
 
 ## Demo Data Seeder
 
-Need a realistic dataset? Use the seeding script to populate 100 products, a year’s worth of restocks, and 20k+ sales line items:
+Need a realistic dataset? The seeding script populates 100 products, a year's worth of restocks, and 20k+ sales line items with proper initial stock, restock, and sales tracking.
+
+### Via Admin UI (Recommended)
+
+1. Log in as `admin` in the frontend
+2. Navigate to the Inventory Management page
+3. Click the **"Seed Demo Data"** button in the top action bar
+4. Wait for the seeding process to complete (status updates automatically)
+
+The seed process runs in the background and updates its status in real-time. Once completed, you'll see all products with their stock history properly populated.
+
+### Via Command Line
+
+Alternatively, you can run the seeding script directly:
 
 ```bash
 python scripts/seed_databases.py
@@ -146,7 +159,10 @@ Environment variables:
 | `INVENTORY_DATABASE_URL` | `postgresql://admin:password123@localhost:5432/inventory_db` |
 | `BILLING_DATABASE_URL`   | `postgresql://admin:password123@localhost:5432/billing_db` |
 
-The script truncates the affected tables (`products`, `stock_movements`, `invoices`, `invoice_items`) before loading fresh data, so run it only in disposable/dev environments.
+**Important Notes:**
+- The script truncates the affected tables (`products`, `stock_movements`, `invoices`, `invoice_items`) before loading fresh data, so run it only in disposable/dev environments.
+- The seed script ensures proper chronological ordering of stock movements (initial stock → restocks → sales) and prevents zero-quantity sales records.
+- Initial stock ranges from 250-500 units per product, with automatic restocks when stock falls below 100 units.
 
 ---
 
@@ -155,7 +171,8 @@ The script truncates the affected tables (`products`, `stock_movements`, `invoic
 - Kafka topic `invoices_topic` is created lazily; the inventory service produces to it and the billing service consumes from it. Kafka UI shows payloads for debugging.
 - Both backend services automatically create their tables via SQLAlchemy metadata on startup.
 - `init_db.sql` ensures databases exist before the services attach.
-- Frontend login is purely client-side: enter `admin` for admin permissions or any other username for the cashier role.
+- Frontend login is purely client-side: enter `admin` for admin permissions (includes seed data functionality) or any other username for the cashier role.
+- Admin users can seed demo data directly from the UI, which generates realistic product catalogs, stock movements, and sales history for the previous calendar year.
 
 ---
 
