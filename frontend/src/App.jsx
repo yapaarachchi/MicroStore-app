@@ -129,12 +129,24 @@ export default function App() {
   const fetchSeedStatus = async () => {
     try {
       const res = await fetch(`${INVENTORY_API}/admin/seed/status`);
-      if (!res.ok) throw new Error("Unable to get seed status");
+      if (!res.ok) {
+        // If 404 or 500, set to idle status instead of showing error
+        if (res.status === 404 || res.status >= 500) {
+          setSeedStatus({ status: 'idle', last_error: null });
+          return;
+        }
+        throw new Error("Unable to get seed status");
+      }
       const data = await res.json();
       setSeedStatus(data);
     } catch (err) {
-      console.error(err);
-      showToast("Unable to check seed status", "error");
+      console.error("Seed status fetch error:", err);
+      // Only show error toast for network errors, not for expected cases
+      if (err.message && !err.message.includes("Failed to fetch")) {
+        setSeedStatus({ status: 'idle', last_error: null });
+      } else {
+        showToast("Unable to check seed status", "error");
+      }
     }
   };
 

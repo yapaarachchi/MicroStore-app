@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -13,7 +14,28 @@ from typing import List, Optional
 from confluent_kafka import Producer
 import models
 from database import engine, get_db, SessionLocal
-from scripts import seed_databases
+
+# Add parent directory to path for scripts import
+# Try both local development path and Docker volume path
+parent_dir = Path(__file__).parent.parent
+seed_databases = None
+
+# Try local development path first (for local runs)
+try:
+    sys.path.insert(0, str(parent_dir))
+    from scripts import seed_databases
+    print(f"✅ Seed module loaded from {parent_dir}/scripts", file=sys.stdout)
+except ImportError:
+    # Try Docker volume path (/scripts) - add / to path so /scripts can be imported
+    try:
+        if "/scripts" not in sys.path:
+            sys.path.insert(0, "/")
+        from scripts import seed_databases
+        print(f"✅ Seed module loaded from /scripts (Docker volume)", file=sys.stdout)
+    except ImportError as e:
+        print(f"⚠️ Could not import seed_databases from {parent_dir}/scripts or /scripts: {e}", file=sys.stderr)
+        print(f"   Current sys.path: {sys.path[:3]}...", file=sys.stderr)
+        seed_databases = None
 
 # --- DB CONNECTION RETRY LOGIC ---
 def wait_for_db():
@@ -123,19 +145,32 @@ def get_seed_action(db: Session):
 
 
 def set_seed_action_status(db: Session, status: str, error: Optional[str] = None):
-    action = get_seed_action(db)
-    if not action:
-        action = models.AdminAction(key=SEED_ACTION_KEY)
-        db.add(action)
-    action.status = status
-    action.last_error = error
-    action.updated_at = datetime.datetime.utcnow()
-    db.commit()
-    db.refresh(action)
-    return action
+    try:
+        action = get_seed_action(db)
+        if not action:
+            action = models.AdminAction(key=SEED_ACTION_KEY)
+            db.add(action)
+        action.status = status
+        action.last_error = error
+        action.updated_at = datetime.datetime.utcnow()
+        db.commit()
+        db.refresh(action)
+        return action
+    except Exception as e:
+        db.rollback()
+        print(f"Error setting seed action status: {e}", file=sys.stderr)
+        raise
 
 
 def run_seed_task(inventory_url: Optional[str], billing_url: Optional[str]):
+    if not seed_databases:
+        session = SessionLocal()
+        try:
+            set_seed_action_status(session, "failed", "Seed module not available")
+        finally:
+            session.close()
+        return
+    
     session = SessionLocal()
     try:
         seed_databases.run_seed(
@@ -152,31 +187,38 @@ def run_seed_task(inventory_url: Optional[str], billing_url: Optional[str]):
 # --- ROUTES ---
 @app.post("/products/")
 def create_product(product: ProductCreate, db: Session = Depends(get_db)):
-    existing = (
-        db.query(models.Product)
-        .filter(func.lower(models.Product.name) == product.name.lower())
-        .first()
-    )
-    if existing:
-        raise HTTPException(status_code=400, detail="Product name already exists.")
+    try:
+        existing = (
+            db.query(models.Product)
+            .filter(func.lower(models.Product.name) == product.name.lower())
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=400, detail="Product name already exists.")
 
-    db_product = models.Product(**product.dict())
-    db.add(db_product)
-    db.flush()
+        db_product = models.Product(**product.dict())
+        db.add(db_product)
+        db.flush()
 
-    movement = models.StockMovement(
-        product_id=db_product.id,
-        change_type="initial",
-        quantity_delta=db_product.stock,
-        previous_stock=0,
-        new_stock=db_product.stock,
-        created_by="system",
-        notes="Initial stock"
-    )
-    db.add(movement)
-    db.commit()
-    db.refresh(db_product)
-    return serialize_product(db_product)
+        movement = models.StockMovement(
+            product_id=db_product.id,
+            change_type="initial",
+            quantity_delta=db_product.stock,
+            previous_stock=0,
+            new_stock=db_product.stock,
+            created_by="system",
+            notes="Initial stock"
+        )
+        db.add(movement)
+        db.commit()
+        db.refresh(db_product)
+        return serialize_product(db_product)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating product: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail=f"Failed to create product: {str(e)}")
 
 @app.get("/products/")
 def read_products(db: Session = Depends(get_db)):
@@ -313,14 +355,22 @@ def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
 
 @app.get("/admin/seed/status")
 def get_seed_status(db: Session = Depends(get_db)):
-    action = get_seed_action(db)
-    if not action:
+    try:
+        action = get_seed_action(db)
+        if not action:
+            return {"status": "idle", "last_error": None}
+        return {"status": action.status, "last_error": action.last_error}
+    except Exception as e:
+        print(f"Error getting seed status: {e}", file=sys.stderr)
+        # If table doesn't exist yet, return idle status
         return {"status": "idle", "last_error": None}
-    return {"status": action.status, "last_error": action.last_error}
 
 
 @app.post("/admin/seed/run")
 def trigger_seed(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    if not seed_databases:
+        raise HTTPException(status_code=500, detail="Seed module not available. Check server logs.")
+    
     action = get_seed_action(db)
     if action and action.status in {"running", "completed"}:
         raise HTTPException(status_code=400, detail=f"Seeding already {action.status}.")

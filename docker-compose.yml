@@ -45,6 +45,8 @@ services:
     container_name: ms_inventory
     ports:
       - "8000:8000"
+    volumes:
+      - ./scripts:/scripts:ro
     depends_on:
       - postgres
       - kafka
