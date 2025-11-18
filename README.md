@@ -131,6 +131,25 @@ The app expects the APIs at `http://localhost:8000` and `http://localhost:8001`.
 
 ---
 
+## Demo Data Seeder
+
+Need a realistic dataset? Use the seeding script to populate 100 products, a year’s worth of restocks, and 20k+ sales line items:
+
+```bash
+python scripts/seed_databases.py
+```
+
+Environment variables:
+
+| Variable | Default |
+|----------|---------|
+| `INVENTORY_DATABASE_URL` | `postgresql://admin:password123@localhost:5432/inventory_db` |
+| `BILLING_DATABASE_URL`   | `postgresql://admin:password123@localhost:5432/billing_db` |
+
+The script truncates the affected tables (`products`, `stock_movements`, `invoices`, `invoice_items`) before loading fresh data, so run it only in disposable/dev environments.
+
+---
+
 ## Operational Notes
 
 - Kafka topic `invoices_topic` is created lazily; the inventory service produces to it and the billing service consumes from it. Kafka UI shows payloads for debugging.

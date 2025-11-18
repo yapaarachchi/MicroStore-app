@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Shield, ShoppingCart, FileText, LogOut, Plus, Database, Server, X, DollarSign, Package } from 'lucide-react';
+import { User, Shield, ShoppingCart, FileText, LogOut, Plus, Database, Server, X, DollarSign, Package, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 
 // API CONFIGURATION
 const INVENTORY_API = "http://localhost:8000";
@@ -22,6 +22,84 @@ const Modal = ({ title, isOpen, onClose, children }) => {
           {children}
         </div>
       </div>
+    </div>
+  );
+};
+
+const Pagination = ({ currentPage, totalPages, onPageChange, total }) => {
+  if (!total || total === 0) return null;
+  
+  const pages = [];
+  const maxVisible = 5;
+  let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
+  let endPage = Math.min(totalPages, startPage + maxVisible - 1);
+  
+  if (endPage - startPage < maxVisible - 1) {
+    startPage = Math.max(1, endPage - maxVisible + 1);
+  }
+  
+  for (let i = startPage; i <= endPage; i++) {
+    pages.push(i);
+  }
+  
+  return (
+    <div className="flex items-center justify-between px-6 py-4 border-t border-slate-200 bg-white">
+      <div className="text-sm text-slate-600 font-medium">
+        Showing page {currentPage} of {totalPages} ({total} total items)
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={currentPage === 1}
+            className="p-2 rounded-md border border-slate-300 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          {startPage > 1 && (
+            <>
+              <button
+                onClick={() => onPageChange(1)}
+                className="px-3 py-1 rounded-md border border-slate-300 hover:bg-slate-100 transition-colors"
+              >
+                1
+              </button>
+              {startPage > 2 && <span className="px-2 text-slate-400">...</span>}
+            </>
+          )}
+          {pages.map(page => (
+            <button
+              key={page}
+              onClick={() => onPageChange(page)}
+              className={`px-3 py-1 rounded-md border transition-colors ${
+                page === currentPage
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'border-slate-300 hover:bg-slate-100'
+              }`}
+            >
+              {page}
+            </button>
+          ))}
+          {endPage < totalPages && (
+            <>
+              {endPage < totalPages - 1 && <span className="px-2 text-slate-400">...</span>}
+              <button
+                onClick={() => onPageChange(totalPages)}
+                className="px-3 py-1 rounded-md border border-slate-300 hover:bg-slate-100 transition-colors"
+              >
+                {totalPages}
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={currentPage === totalPages}
+            className="p-2 rounded-md border border-slate-300 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };
@@ -72,44 +150,138 @@ export default function App() {
   const [invoices, setInvoices] = useState([]);
   const [activeTab, setActiveTab] = useState('inventory');
   const [loading, setLoading] = useState(false);
+  
+  // Pagination state
+  const [productsPage, setProductsPage] = useState(1);
+  const [productsPagination, setProductsPagination] = useState({ total: 0, total_pages: 1, page: 1 });
+  const [invoicesPage, setInvoicesPage] = useState(1);
+  const [invoicesPagination, setInvoicesPagination] = useState({ total: 0, total_pages: 1, page: 1 });
 
   // Modal States
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isSellModalOpen, setIsSellModalOpen] = useState(false);
+  const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
 
   // Forms State
   const [addProductForm, setAddProductForm] = useState({ name: '', price: '', stock: '', category: 'Vegetables' });
   const [sellForm, setSellForm] = useState({ customerName: '', items: [{ productId: '', quantity: 1 }] });
+  const [restockForm, setRestockForm] = useState({ quantity: 1, notes: '' });
   const [invoiceDetail, setInvoiceDetail] = useState(null);
   const [isInvoiceModalOpen, setIsInvoiceModalOpen] = useState(false);
   const [invoiceModalLoading, setInvoiceModalLoading] = useState(false);
+  const [restockProduct, setRestockProduct] = useState(null);
+  const [restockLoading, setRestockLoading] = useState(false);
+  const [historyProduct, setHistoryProduct] = useState(null);
+  const [stockHistory, setStockHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [openActionMenu, setOpenActionMenu] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [seedStatus, setSeedStatus] = useState({ status: 'idle', last_error: null });
+  const [seedLoading, setSeedLoading] = useState(false);
+
+  const showToast = (message, type = 'info', duration = 3500) => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(toast => toast.id !== id));
+    }, duration);
+  };
 
   // --- API CALLS ---
 
-  const fetchProducts = async () => {
+  const fetchProducts = async (page = productsPage) => {
     try {
-      const res = await fetch(`${INVENTORY_API}/products/`);
+      const res = await fetch(`${INVENTORY_API}/products/?page=${page}&page_size=50`);
       const data = await res.json();
-      setProducts(data);
+      if (data.items) {
+        setProducts(data.items);
+        setProductsPagination({
+          total: data.total || 0,
+          total_pages: data.total_pages || 1,
+          page: data.page || 1
+        });
+        setProductsPage(data.page || 1);
+      } else {
+        // Fallback for old API format
+        const items = Array.isArray(data) ? data : [];
+        setProducts(items);
+        setProductsPagination({
+          total: items.length,
+          total_pages: 1,
+          page: 1
+        });
+        setProductsPage(1);
+      }
     } catch (err) {
       console.error("Failed to fetch inventory", err);
     }
   };
 
-  const fetchInvoices = async () => {
+  const fetchInvoices = async (page = invoicesPage) => {
     try {
-      const res = await fetch(`${BILLING_API}/invoices/`);
+      const res = await fetch(`${BILLING_API}/invoices/?page=${page}&page_size=50`);
       const data = await res.json();
-      setInvoices(data);
+      if (data.items) {
+        setInvoices(data.items);
+        setInvoicesPagination({
+          total: data.total || 0,
+          total_pages: data.total_pages || 1,
+          page: data.page || 1
+        });
+        setInvoicesPage(data.page || 1);
+      } else {
+        // Fallback for old API format
+        const items = Array.isArray(data) ? data : [];
+        setInvoices(items);
+        setInvoicesPagination({
+          total: items.length,
+          total_pages: 1,
+          page: 1
+        });
+        setInvoicesPage(1);
+      }
     } catch (err) {
       console.error("Failed to fetch invoices", err);
+    }
+  };
+
+  const fetchSeedStatus = async () => {
+    try {
+      const res = await fetch(`${INVENTORY_API}/admin/seed/status`);
+      if (!res.ok) {
+        // If 404 or 500, set to idle status instead of showing error
+        if (res.status === 404 || res.status >= 500) {
+          setSeedStatus({ status: 'idle', last_error: null });
+          return;
+        }
+        throw new Error("Unable to get seed status");
+      }
+      const data = await res.json();
+      setSeedStatus(data);
+    } catch (err) {
+      console.error("Seed status fetch error:", err);
+      // Only show error toast for network errors, not for expected cases
+      if (err.message && !err.message.includes("Failed to fetch")) {
+        setSeedStatus({ status: 'idle', last_error: null });
+      } else {
+        showToast("Unable to check seed status", "error");
+      }
     }
   };
 
   useEffect(() => {
     if (user) {
       fetchProducts();
-      if (activeTab === 'invoices') fetchInvoices();
+      // Redirect non-admins away from invoices tab
+      if (activeTab === 'invoices' && user.role !== 'Admin') {
+        setActiveTab('inventory');
+      } else if (activeTab === 'invoices') {
+        fetchInvoices();
+      }
+      if (user.role === 'Admin') {
+        fetchSeedStatus();
+      }
     }
   }, [user, activeTab]);
 
@@ -152,6 +324,90 @@ export default function App() {
     });
   };
 
+  const handleSeedDemo = async () => {
+    setSeedLoading(true);
+    try {
+      const res = await fetch(`${INVENTORY_API}/admin/seed/run`, {
+        method: 'POST'
+      });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Unable to start seeding");
+      }
+      showToast("Seeding started. This may take a minute.", "info");
+      await fetchSeedStatus();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+    setSeedLoading(false);
+  };
+
+  const openRestockModal = (product) => {
+    setRestockProduct(product);
+    setRestockForm({ quantity: 1, notes: '' });
+    setIsRestockModalOpen(true);
+  };
+
+  const handleRestockSubmit = async (e) => {
+    e.preventDefault();
+    if (!restockProduct) return;
+    const quantity = parseInt(restockForm.quantity);
+    if (!quantity || quantity <= 0) {
+      showToast("Quantity must be greater than zero", "warning");
+      return;
+    }
+
+    setRestockLoading(true);
+    try {
+      const payload = {
+        quantity,
+        user_id: user.name,
+        notes: restockForm.notes || null
+      };
+      const res = await fetch(`${INVENTORY_API}/products/${restockProduct.id}/restock/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to restock");
+      }
+      await fetchProducts();
+      showToast(`Added ${quantity} units to ${restockProduct.name}`, "success");
+      setIsRestockModalOpen(false);
+    } catch (err) {
+      showToast(`Restock failed: ${err.message}`, "error");
+    }
+    setRestockLoading(false);
+  };
+
+  const openHistoryModal = async (product) => {
+    setHistoryProduct(product);
+    setIsHistoryModalOpen(true);
+    setHistoryLoading(true);
+    setStockHistory([]);
+    try {
+      const res = await fetch(`${INVENTORY_API}/products/${product.id}/stock-history/`);
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Unable to load history");
+      }
+      const data = await res.json();
+      setStockHistory(data);
+    } catch (err) {
+      showToast(`Failed to load history: ${err.message}`, "error");
+      setIsHistoryModalOpen(false);
+    }
+    setHistoryLoading(false);
+  };
+
+  const closeHistoryModal = () => {
+    setIsHistoryModalOpen(false);
+    setHistoryProduct(null);
+    setStockHistory([]);
+  };
+
   // --- HANDLERS ---
 
   const handleLogout = () => {
@@ -163,9 +419,24 @@ export default function App() {
     e.preventDefault();
     setLoading(true);
     try {
+      const trimmedName = addProductForm.name.trim();
+      if (!trimmedName) {
+        showToast("Item name is required", "warning");
+        setLoading(false);
+        return;
+      }
+      const duplicate = products.some(
+        p => p.name.toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (duplicate) {
+        showToast("This item name already exists", "warning");
+        setLoading(false);
+        return;
+      }
+
       // FIX: Ensure numbers are sent as numbers, not strings
       const payload = {
-        name: addProductForm.name,
+        name: trimmedName,
         category: addProductForm.category,
         price: parseFloat(addProductForm.price),
         stock: parseInt(addProductForm.stock)
@@ -185,17 +456,20 @@ export default function App() {
       setAddProductForm({ name: '', price: '', stock: '', category: 'Vegetables' });
       setIsAddModalOpen(false);
       fetchProducts();
-      alert("Product Added Successfully");
+      showToast("Product added successfully", "success");
     } catch (err) {
       console.error(err);
-      alert(`Failed to add product: ${err.message}`);
+      showToast(`Failed to add product: ${err.message}`, "error");
     }
     setLoading(false);
   };
 
   const handleSellSubmit = async (e) => {
     e.preventDefault();
-    if (!sellForm.customerName) return alert("Please enter customer name");
+    if (!sellForm.customerName) {
+      showToast("Please enter a customer name", "warning");
+      return;
+    }
 
     const payloadItems = sellForm.items
       .filter(item => item.productId)
@@ -205,7 +479,8 @@ export default function App() {
       }));
 
     if (payloadItems.length === 0) {
-      return alert("Please select at least one product");
+      showToast("Add at least one product to the cart", "warning");
+      return;
     }
 
     setLoading(true);
@@ -227,13 +502,13 @@ export default function App() {
         throw new Error(errorData.detail || "Transaction failed");
       }
 
-      alert(`Sold ${payloadItems.length} items to ${sellForm.customerName}! Invoice generated.`);
+      showToast(`Sale completed for ${sellForm.customerName}`, "success");
       setSellForm({ customerName: '', items: [{ productId: products[0]?.id || '', quantity: 1 }] });
       setIsSellModalOpen(false);
       fetchProducts(); // Refresh stock
       if (activeTab === 'invoices') fetchInvoices();
     } catch (err) {
-      alert(`Error processing sale: ${err.message}`);
+      showToast(`Error processing sale: ${err.message}`, "error");
     }
     setLoading(false);
   };
@@ -251,7 +526,7 @@ export default function App() {
       const data = await res.json();
       setInvoiceDetail(data);
     } catch (err) {
-      alert(`Unable to load invoice: ${err.message}`);
+      showToast(`Unable to load invoice: ${err.message}`, "error");
       setIsInvoiceModalOpen(false);
     } finally {
       setInvoiceModalLoading(false);
@@ -262,6 +537,24 @@ export default function App() {
     setIsInvoiceModalOpen(false);
     setInvoiceDetail(null);
   };
+
+  useEffect(() => {
+    const closeMenu = (event) => {
+      if (event.defaultPrevented) return;
+      setOpenActionMenu(null);
+    };
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, []);
+
+  useEffect(() => {
+    if (user?.role !== 'Admin') return;
+    if (seedStatus.status !== 'running') return;
+    const interval = setInterval(() => {
+      fetchSeedStatus();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [seedStatus.status, user]);
 
   if (!user) return <Login onLogin={setUser} />;
 
@@ -280,7 +573,7 @@ export default function App() {
           <div className="flex items-center space-x-6">
             <div className="flex items-center space-x-2 bg-slate-800 px-3 py-1 rounded-full">
               {user.role === 'Admin' ? <Shield size={16} className="text-yellow-400" /> : <User size={16} className="text-green-400" />}
-              <span className="text-sm font-medium">{user.name}</span>
+              <span className="text-sm font-medium capitalize">{user.name || 'User'}</span>
             </div>
             <button 
               onClick={handleLogout} 
@@ -302,12 +595,14 @@ export default function App() {
           >
             <ShoppingCart size={16} /><span>Inventory Management</span>
           </button>
-          <button 
-            onClick={() => setActiveTab('invoices')} 
-            className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center space-x-2 ${activeTab === 'invoices' ? 'bg-blue-50 text-blue-600 shadow-sm ring-1 ring-blue-200' : 'text-slate-500 hover:text-slate-700'}`}
-          >
-            <FileText size={16} /><span>Billing History</span>
-          </button>
+          {user.role === 'Admin' && (
+            <button 
+              onClick={() => setActiveTab('invoices')} 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center space-x-2 ${activeTab === 'invoices' ? 'bg-blue-50 text-blue-600 shadow-sm ring-1 ring-blue-200' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <FileText size={16} /><span>Billing History</span>
+            </button>
+          )}
         </div>
 
         {/* INVENTORY TAB */}
@@ -329,6 +624,29 @@ export default function App() {
                   </button>
                 )}
 
+                  {/* SEED DEMO DATA BUTTON (ADMIN ONLY) */}
+                  {user.role === 'Admin' && (
+                    <button
+                      onClick={handleSeedDemo}
+                      disabled={seedLoading || seedStatus.status === 'running' || seedStatus.status === 'completed'}
+                      className={`flex items-center space-x-2 px-4 py-2.5 rounded-lg shadow-md border transition-all ${
+                        seedStatus.status === 'completed'
+                          ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                          : seedStatus.status === 'running'
+                          ? 'bg-amber-100 text-amber-700 cursor-wait'
+                          : 'bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="font-medium text-sm">
+                        {seedStatus.status === 'completed'
+                          ? 'Demo Data Seeded'
+                          : seedStatus.status === 'running'
+                          ? 'Seeding...'
+                          : 'Seed Demo Data'}
+                      </span>
+                    </button>
+                  )}
+
                 {/* SELL PRODUCT BUTTON (ALL USERS) */}
                 <button 
                   onClick={() => setIsSellModalOpen(true)}
@@ -339,6 +657,9 @@ export default function App() {
                 </button>
               </div>
             </div>
+            {user.role === 'Admin' && seedStatus.last_error && (
+              <p className="text-sm text-red-500">Seed failed: {seedStatus.last_error}</p>
+            )}
 
             {/* Data Table */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -350,6 +671,8 @@ export default function App() {
                     <th className="px-6 py-4 font-semibold">Category</th>
                     <th className="px-6 py-4 font-semibold text-right">Unit Price</th>
                     <th className="px-6 py-4 font-semibold text-center">Stock</th>
+                    <th className="px-6 py-4 font-semibold text-right">Updated</th>
+                    <th className="px-6 py-4 font-semibold text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -375,6 +698,51 @@ export default function App() {
                           {p.stock}
                         </span>
                       </td>
+                      <td className="px-6 py-4 text-right text-slate-500 text-xs">
+                        {p.updated_at ? new Date(p.updated_at).toLocaleString() : '—'}
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="relative flex justify-end">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenActionMenu(openActionMenu === p.id ? null : p.id);
+                            }}
+                            className="p-2 rounded-full hover:bg-slate-100 text-slate-500"
+                          >
+                            <MoreHorizontal size={18} />
+                          </button>
+                          {openActionMenu === p.id && (
+                            <div 
+                              className="absolute right-0 mt-2 w-40 bg-white border border-slate-200 rounded-lg shadow-lg z-10"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openHistoryModal(p);
+                                  setOpenActionMenu(null);
+                                }}
+                                className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                              >
+                                View History
+                              </button>
+                              {user.role === 'Admin' && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openRestockModal(p);
+                                    setOpenActionMenu(null);
+                                  }}
+                                  className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                                >
+                                  Restock
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   ))}
                   {products.length === 0 && (
@@ -387,11 +755,20 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+            <Pagination
+              currentPage={productsPagination.page}
+              totalPages={productsPagination.total_pages}
+              total={productsPagination.total}
+              onPageChange={(page) => {
+                setProductsPage(page);
+                fetchProducts(page);
+              }}
+            />
           </div>
         )}
 
         {/* INVOICES TAB */}
-        {activeTab === 'invoices' && (
+        {activeTab === 'invoices' && user.role === 'Admin' && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
              <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 className="font-bold text-slate-700">Sales History</h3>
@@ -426,6 +803,15 @@ export default function App() {
                   {invoices.length === 0 && <tr><td colSpan="6" className="text-center py-12 text-slate-400">No invoices found.</td></tr>}
                 </tbody>
               </table>
+              <Pagination
+                currentPage={invoicesPagination.page}
+                totalPages={invoicesPagination.total_pages}
+                total={invoicesPagination.total}
+                onPageChange={(page) => {
+                  setInvoicesPage(page);
+                  fetchInvoices(page);
+                }}
+              />
           </div>
         )}
       </main>
@@ -590,6 +976,104 @@ export default function App() {
         </form>
       </Modal>
 
+      {/* RESTOCK MODAL */}
+      <Modal 
+        title={restockProduct ? `Restock ${restockProduct.name}` : "Restock"} 
+        isOpen={isRestockModalOpen} 
+        onClose={() => setIsRestockModalOpen(false)}
+      >
+        <form onSubmit={handleRestockSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Quantity to Add</label>
+            <input 
+              type="number"
+              min="1"
+              className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+              value={restockForm.quantity}
+              onChange={e => setRestockForm(prev => ({ ...prev, quantity: e.target.value }))}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notes (optional)</label>
+            <textarea
+              className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+              rows="3"
+              value={restockForm.notes}
+              onChange={e => setRestockForm(prev => ({ ...prev, notes: e.target.value }))}
+              placeholder="e.g. Supplier delivery batch #42"
+            />
+          </div>
+          <div className="pt-2">
+            <button
+              type="submit"
+              disabled={restockLoading}
+              className="w-full bg-amber-400 hover:bg-amber-500 text-black py-3 rounded-lg font-semibold text-sm tracking-wide shadow-lg transition-transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {restockLoading ? 'Updating…' : 'Confirm Restock'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* STOCK HISTORY MODAL */}
+      {isHistoryModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4 py-8" onClick={closeHistoryModal}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col" style={{ maxHeight: '85vh' }} onClick={(e) => e.stopPropagation()}>
+            <div className="bg-slate-900 px-6 py-4 flex justify-between items-center flex-shrink-0">
+              <h3 className="text-white font-bold text-lg">{historyProduct ? `Stock History • ${historyProduct.name}` : "Stock History"}</h3>
+              <button onClick={closeHistoryModal} className="text-slate-400 hover:text-white transition-colors z-10">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto" style={{ maxHeight: 'calc(85vh - 80px)' }}>
+              {historyLoading && <p className="text-center text-slate-500">Loading history...</p>}
+              {!historyLoading && stockHistory.length === 0 && (
+                <p className="text-center text-slate-400">No history records yet.</p>
+              )}
+              {!historyLoading && stockHistory.length > 0 && (
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-100 text-xs uppercase text-slate-500">
+                        <tr>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">When</th>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">Type</th>
+                          <th className="px-4 py-2 text-center sticky top-0 bg-slate-100">Δ Qty</th>
+                          <th className="px-4 py-2 text-center sticky top-0 bg-slate-100">Stock</th>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">By</th>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {stockHistory.map(entry => (
+                          <tr key={entry.id}>
+                            <td className="px-4 py-2 text-slate-600 text-xs">
+                              {entry.created_at ? new Date(entry.created_at).toLocaleString() : '—'}
+                            </td>
+                            <td className="px-4 py-2 capitalize font-semibold text-slate-700">
+                              {entry.change_type}
+                            </td>
+                            <td className={`px-4 py-2 text-center font-mono ${entry.quantity_delta >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {entry.quantity_delta > 0 ? `+${entry.quantity_delta}` : entry.quantity_delta}
+                            </td>
+                            <td className="px-4 py-2 text-center text-slate-600 text-xs">
+                              {entry.previous_stock} → {entry.new_stock}
+                            </td>
+                            <td className="px-4 py-2 text-slate-500 text-xs">{entry.created_by || '—'}</td>
+                            <td className="px-4 py-2 text-slate-600 text-xs">{entry.notes || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* INVOICE DETAIL MODAL */}
       <Modal title="Invoice Details" isOpen={isInvoiceModalOpen} onClose={closeInvoiceModal}>
         {invoiceModalLoading && <p className="text-center text-slate-500">Loading invoice...</p>}
@@ -645,6 +1129,26 @@ export default function App() {
           <p className="text-center text-slate-500">Invoice data unavailable.</p>
         )}
       </Modal>
+
+      {/* TOASTS */}
+      <div className="fixed bottom-4 right-4 space-y-3 z-50">
+        {toasts.map(toast => {
+          const palette = {
+            success: 'bg-green-600 text-white border border-green-500',
+            error: 'bg-red-600 text-white border border-red-500',
+            warning: 'bg-amber-400 text-slate-900 border border-amber-500',
+            info: 'bg-slate-700 text-white border border-slate-600'
+          };
+          return (
+            <div
+              key={toast.id}
+              className={`px-4 py-3 rounded-lg shadow-lg text-sm font-semibold tracking-wide ${palette[toast.type] ?? palette.info}`}
+            >
+              {toast.message}
+            </div>
+          );
+        })}
+      </div>
 
     </div>
   );

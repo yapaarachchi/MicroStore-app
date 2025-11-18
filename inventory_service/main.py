@@ -1,16 +1,51 @@
+import datetime
 import json
 import os
 import sys
 import time
-from fastapi import FastAPI, Depends, HTTPException
+from pathlib import Path
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from pydantic import BaseModel, conint
-from typing import List
+from typing import List, Optional
 from confluent_kafka import Producer
 import models
-from database import engine, get_db
+from database import engine, get_db, SessionLocal
+
+# Add parent directory to path for scripts import
+# Try both local development path and Docker volume path
+parent_dir = Path(__file__).parent.parent
+seed_databases = None
+
+# Try local development path first (for local runs)
+try:
+    sys.path.insert(0, str(parent_dir))
+    from scripts import seed_databases
+    print(f"✅ Seed module loaded from {parent_dir}/scripts", file=sys.stdout)
+except ImportError:
+    # Try Docker volume path (/scripts) - add / to path so /scripts can be imported
+    try:
+        if "/scripts" not in sys.path:
+            sys.path.insert(0, "/")
+        from scripts import seed_databases
+        print(f"✅ Seed module loaded from /scripts (Docker volume)", file=sys.stdout)
+    except ImportError as e:
+        print(f"⚠️ Could not import seed_databases from {parent_dir}/scripts or /scripts: {e}", file=sys.stderr)
+        print(f"   Current sys.path: {sys.path[:3]}...", file=sys.stderr)
+        seed_databases = None
+
+# Database URLs for seeding task
+INVENTORY_SEED_DB_URL = os.getenv(
+    "INVENTORY_DATABASE_URL",
+    os.getenv("DATABASE_URL", "postgresql://admin:password123@localhost:5432/inventory_db"),
+)
+BILLING_SEED_DB_URL = os.getenv(
+    "BILLING_DATABASE_URL",
+    "postgresql://admin:password123@localhost:5432/billing_db",
+)
 
 # --- DB CONNECTION RETRY LOGIC ---
 def wait_for_db():
@@ -73,18 +108,195 @@ class AssignRequest(BaseModel):
     user_id: str
     items: List[SaleItem]
 
+class RestockRequest(BaseModel):
+    quantity: conint(gt=0)
+    user_id: str
+    notes: Optional[str] = None
+
+
+def serialize_product(product: models.Product):
+    return {
+        "id": product.id,
+        "name": product.name,
+        "price": product.price,
+        "stock": product.stock,
+        "category": product.category,
+        "created_at": product.created_at.isoformat() if product.created_at else None,
+        "updated_at": product.updated_at.isoformat() if product.updated_at else None
+    }
+
+
+def serialize_movement(movement: models.StockMovement):
+    return {
+        "id": movement.id,
+        "product_id": movement.product_id,
+        "change_type": movement.change_type,
+        "quantity_delta": movement.quantity_delta,
+        "previous_stock": movement.previous_stock,
+        "new_stock": movement.new_stock,
+        "notes": movement.notes,
+        "created_by": movement.created_by,
+        "created_at": movement.created_at.isoformat() if movement.created_at else None
+    }
+
+
+SEED_ACTION_KEY = "demo-data-seed"
+
+
+def get_seed_action(db: Session):
+    return (
+        db.query(models.AdminAction)
+        .filter(models.AdminAction.key == SEED_ACTION_KEY)
+        .first()
+    )
+
+
+def set_seed_action_status(db: Session, status: str, error: Optional[str] = None):
+    try:
+        action = get_seed_action(db)
+        if not action:
+            action = models.AdminAction(key=SEED_ACTION_KEY)
+            db.add(action)
+        action.status = status
+        action.last_error = error
+        action.updated_at = datetime.datetime.utcnow()
+        db.commit()
+        db.refresh(action)
+        return action
+    except Exception as e:
+        db.rollback()
+        print(f"Error setting seed action status: {e}", file=sys.stderr)
+        raise
+
+
+def run_seed_task(inventory_url: Optional[str], billing_url: Optional[str]):
+    if not seed_databases:
+        session = SessionLocal()
+        try:
+            set_seed_action_status(session, "failed", "Seed module not available")
+        finally:
+            session.close()
+        return
+    
+    session = SessionLocal()
+    try:
+        seed_databases.run_seed(
+            inventory_url=inventory_url,
+            billing_url=billing_url,
+        )
+        set_seed_action_status(session, "completed", None)
+    except Exception as exc:
+        set_seed_action_status(session, "failed", str(exc))
+        print(f"[SEED] Failed to seed demo data: {exc}", file=sys.stderr)
+    finally:
+        session.close()
+
 # --- ROUTES ---
 @app.post("/products/")
 def create_product(product: ProductCreate, db: Session = Depends(get_db)):
-    db_product = models.Product(**product.dict())
-    db.add(db_product)
-    db.commit()
-    db.refresh(db_product)
-    return db_product
+    try:
+        existing = (
+            db.query(models.Product)
+            .filter(func.lower(models.Product.name) == product.name.lower())
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=400, detail="Product name already exists.")
+
+        db_product = models.Product(**product.dict())
+        db.add(db_product)
+        db.flush()
+
+        movement = models.StockMovement(
+            product_id=db_product.id,
+            change_type="initial",
+            quantity_delta=db_product.stock,
+            previous_stock=0,
+            new_stock=db_product.stock,
+            created_by="system",
+            notes="Initial stock"
+        )
+        db.add(movement)
+        db.commit()
+        db.refresh(db_product)
+        return serialize_product(db_product)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating product: {e}", file=sys.stderr)
+        raise HTTPException(status_code=500, detail=f"Failed to create product: {str(e)}")
 
 @app.get("/products/")
-def read_products(db: Session = Depends(get_db)):
-    return db.query(models.Product).all()
+def read_products(page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 100:
+        page_size = 50
+    
+    offset = (page - 1) * page_size
+    total = db.query(models.Product).count()
+    products = db.query(models.Product).offset(offset).limit(page_size).all()
+    
+    return {
+        "items": [serialize_product(product) for product in products],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size
+    }
+
+
+@app.post("/products/{product_id}/restock/")
+def restock_product(product_id: int, request: RestockRequest, db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    previous_stock = product.stock
+    product.stock += request.quantity
+
+    movement = models.StockMovement(
+        product_id=product.id,
+        change_type="restock",
+        quantity_delta=request.quantity,
+        previous_stock=previous_stock,
+        new_stock=product.stock,
+        created_by=request.user_id,
+        notes=request.notes
+    )
+
+    db.add(movement)
+    db.commit()
+    db.refresh(movement)
+    db.refresh(product)
+
+    return {
+        "product": serialize_product(product),
+        "movement": serialize_movement(movement)
+    }
+
+
+@app.get("/products/{product_id}/stock-history/")
+def get_stock_history(product_id: int, limit: int = 25, db: Session = Depends(get_db)):
+    product_exists = db.query(models.Product.id).filter(models.Product.id == product_id).first()
+    if not product_exists:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # Get all movements and sort chronologically by datetime (oldest first)
+    # This ensures initial stock appears first, followed by restocks and sales in chronological order
+    all_movements = (
+        db.query(models.StockMovement)
+        .filter(models.StockMovement.product_id == product_id)
+        .order_by(models.StockMovement.created_at.asc())
+        .all()
+    )
+    
+    # Apply limit if specified
+    if limit and limit > 0:
+        all_movements = all_movements[:limit]
+    
+    return [serialize_movement(movement) for movement in all_movements]
 
 @app.post("/assign/")
 def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
@@ -97,6 +309,7 @@ def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
 
     invoice_items = []
     total_amount = 0
+    movement_entries = []
 
     # Validate availability
     for item in request.items:
@@ -113,6 +326,7 @@ def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
     try:
         for item in request.items:
             product = product_map[item.product_id]
+            previous_stock = product.stock
             product.stock -= item.quantity
             line_total = product.price * item.quantity
             total_amount += line_total
@@ -123,6 +337,21 @@ def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
                 "quantity": item.quantity,
                 "line_total": line_total
             })
+            movement_entries.append(
+                models.StockMovement(
+                    product_id=product.id,
+                    change_type="sale",
+                    quantity_delta=-item.quantity,
+                    previous_stock=previous_stock,
+                    new_stock=product.stock,
+                    created_by=request.user_id,
+                    notes=f"Sale to {request.customer_name}"
+                )
+            )
+
+        for movement in movement_entries:
+            db.add(movement)
+
         db.commit()
     except Exception as e:
         db.rollback()
@@ -149,3 +378,34 @@ def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
         "total_amount": total_amount,
         "items": invoice_items
     }
+
+
+@app.get("/admin/seed/status")
+def get_seed_status(db: Session = Depends(get_db)):
+    try:
+        action = get_seed_action(db)
+        if not action:
+            return {"status": "idle", "last_error": None}
+        return {"status": action.status, "last_error": action.last_error}
+    except Exception as e:
+        print(f"Error getting seed status: {e}", file=sys.stderr)
+        # If table doesn't exist yet, return idle status
+        return {"status": "idle", "last_error": None}
+
+
+@app.post("/admin/seed/run")
+def trigger_seed(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    if not seed_databases:
+        raise HTTPException(status_code=500, detail="Seed module not available. Check server logs.")
+    
+    action = get_seed_action(db)
+    if action and action.status in {"running", "completed"}:
+        raise HTTPException(status_code=400, detail=f"Seeding already {action.status}.")
+    set_seed_action_status(db, "running", None)
+
+    if not INVENTORY_SEED_DB_URL or not BILLING_SEED_DB_URL:
+        set_seed_action_status(db, "failed", "Database URLs not configured.")
+        raise HTTPException(status_code=500, detail="Database URLs not configured for seeding.")
+
+    background_tasks.add_task(run_seed_task, INVENTORY_SEED_DB_URL, BILLING_SEED_DB_URL)
+    return {"status": "running"}
