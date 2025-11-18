@@ -79,7 +79,10 @@ export default function App() {
 
   // Forms State
   const [addProductForm, setAddProductForm] = useState({ name: '', price: '', stock: '', category: 'Vegetables' });
-  const [sellForm, setSellForm] = useState({ customerName: '', productId: '', quantity: 1 });
+  const [sellForm, setSellForm] = useState({ customerName: '', items: [{ productId: '', quantity: 1 }] });
+  const [invoiceDetail, setInvoiceDetail] = useState(null);
+  const [isInvoiceModalOpen, setIsInvoiceModalOpen] = useState(false);
+  const [invoiceModalLoading, setInvoiceModalLoading] = useState(false);
 
   // --- API CALLS ---
 
@@ -88,10 +91,6 @@ export default function App() {
       const res = await fetch(`${INVENTORY_API}/products/`);
       const data = await res.json();
       setProducts(data);
-      // Default select first product for sell form if available
-      if (data.length > 0 && !sellForm.productId) {
-        setSellForm(prev => ({ ...prev, productId: data[0].id }));
-      }
     } catch (err) {
       console.error("Failed to fetch inventory", err);
     }
@@ -113,6 +112,45 @@ export default function App() {
       if (activeTab === 'invoices') fetchInvoices();
     }
   }, [user, activeTab]);
+
+  useEffect(() => {
+    if (products.length === 0) return;
+    setSellForm(prev => {
+      let changed = false;
+      const updatedItems = prev.items.map(item => {
+        if (item.productId) return item;
+        changed = true;
+        return { ...item, productId: products[0].id };
+      });
+      return changed ? { ...prev, items: updatedItems } : prev;
+    });
+  }, [products]);
+
+  const getProductById = (id) => products.find(p => p.id === Number(id));
+
+  const handleCartItemChange = (index, field, value) => {
+    setSellForm(prev => {
+      const updatedItems = prev.items.map((item, idx) => idx === index ? { ...item, [field]: value } : item);
+      return { ...prev, items: updatedItems };
+    });
+  };
+
+  const addCartItem = () => {
+    setSellForm(prev => ({
+      ...prev,
+      items: [
+        ...prev.items,
+        { productId: products[0]?.id || '', quantity: 1 }
+      ]
+    }));
+  };
+
+  const removeCartItem = (index) => {
+    setSellForm(prev => {
+      if (prev.items.length === 1) return prev;
+      return { ...prev, items: prev.items.filter((_, idx) => idx !== index) };
+    });
+  };
 
   // --- HANDLERS ---
 
@@ -157,16 +195,25 @@ export default function App() {
 
   const handleSellSubmit = async (e) => {
     e.preventDefault();
-    if (!sellForm.customerName || !sellForm.productId) return alert("Please fill all fields");
-    
+    if (!sellForm.customerName) return alert("Please enter customer name");
+
+    const payloadItems = sellForm.items
+      .filter(item => item.productId)
+      .map(item => ({
+        product_id: parseInt(item.productId),
+        quantity: parseInt(item.quantity) || 1
+      }));
+
+    if (payloadItems.length === 0) {
+      return alert("Please select at least one product");
+    }
+
     setLoading(true);
     try {
-      // FIX: Ensure numbers are sent as numbers
       const payload = {
-        product_id: parseInt(sellForm.productId),
         customer_name: sellForm.customerName,
         user_id: user.name,
-        quantity: parseInt(sellForm.quantity)
+        items: payloadItems
       };
 
       const res = await fetch(`${INVENTORY_API}/assign/`, {
@@ -180,14 +227,40 @@ export default function App() {
         throw new Error(errorData.detail || "Transaction failed");
       }
 
-      alert(`Sold ${sellForm.quantity} items to ${sellForm.customerName}! Invoice generated.`);
-      setSellForm({ customerName: '', productId: products[0]?.id || '', quantity: 1 });
+      alert(`Sold ${payloadItems.length} items to ${sellForm.customerName}! Invoice generated.`);
+      setSellForm({ customerName: '', items: [{ productId: products[0]?.id || '', quantity: 1 }] });
       setIsSellModalOpen(false);
       fetchProducts(); // Refresh stock
+      if (activeTab === 'invoices') fetchInvoices();
     } catch (err) {
       alert(`Error processing sale: ${err.message}`);
     }
     setLoading(false);
+  };
+
+  const openInvoiceDetails = async (invoiceId) => {
+    setIsInvoiceModalOpen(true);
+    setInvoiceModalLoading(true);
+    setInvoiceDetail(null);
+    try {
+      const res = await fetch(`${BILLING_API}/invoices/${invoiceId}`);
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to fetch invoice");
+      }
+      const data = await res.json();
+      setInvoiceDetail(data);
+    } catch (err) {
+      alert(`Unable to load invoice: ${err.message}`);
+      setIsInvoiceModalOpen(false);
+    } finally {
+      setInvoiceModalLoading(false);
+    }
+  };
+
+  const closeInvoiceModal = () => {
+    setIsInvoiceModalOpen(false);
+    setInvoiceDetail(null);
   };
 
   if (!user) return <Login onLogin={setUser} />;
@@ -329,21 +402,25 @@ export default function App() {
                   <tr>
                     <th className="px-6 py-3">Invoice ID</th>
                     <th className="px-6 py-3">Customer</th>
-                    <th className="px-6 py-3">Item</th>
-                    <th className="px-6 py-3 text-center">Qty</th>
+                    <th className="px-6 py-3 text-center">Items</th>
                     <th className="px-6 py-3 text-right">Total Amount</th>
                     <th className="px-6 py-3 text-center">Seller</th>
+                    <th className="px-6 py-3 text-right">Created</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {invoices.map(inv => (
-                    <tr key={inv.id} className="hover:bg-slate-50">
+                    <tr 
+                      key={inv.id} 
+                      className="hover:bg-blue-50 transition-colors cursor-pointer"
+                      onClick={() => openInvoiceDetails(inv.id)}
+                    >
                       <td className="px-6 py-3 text-slate-400 font-mono text-xs">#{inv.id}</td>
                       <td className="px-6 py-3 font-medium text-slate-800">{inv.customer_name}</td>
-                      <td className="px-6 py-3 text-slate-600">{inv.product_name}</td>
-                      <td className="px-6 py-3 text-center font-bold text-slate-700">{inv.quantity || 1}</td>
-                      <td className="px-6 py-3 text-right text-green-600 font-bold font-mono">${(inv.amount || 0).toFixed(2)}</td>
+                      <td className="px-6 py-3 text-center font-bold text-slate-700">{inv.item_count || 0}</td>
+                      <td className="px-6 py-3 text-right text-green-600 font-bold font-mono">${(inv.total_amount || 0).toFixed(2)}</td>
                       <td className="px-6 py-3 text-center text-slate-500 text-xs">{inv.generated_by}</td>
+                      <td className="px-6 py-3 text-right text-slate-400 text-xs">{new Date(inv.created_at).toLocaleString()}</td>
                     </tr>
                   ))}
                   {invoices.length === 0 && <tr><td colSpan="6" className="text-center py-12 text-slate-400">No invoices found.</td></tr>}
@@ -434,39 +511,76 @@ export default function App() {
               autoFocus
             />
           </div>
-          
-          <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Select Item to Scan</label>
-            <select 
-              className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-green-500 outline-none bg-white"
-              value={sellForm.productId}
-              onChange={e => setSellForm({...sellForm, productId: e.target.value})}
-              required
-            >
-              <option value="" disabled>-- Select Item --</option>
-              {products.map(p => (
-                <option key={p.id} value={p.id} disabled={p.stock <= 0}>
-                  {p.name} (${p.price}) {p.stock <= 0 ? '- OUT OF STOCK' : ''}
-                </option>
-              ))}
-            </select>
+
+          <div className="space-y-4 max-h-80 overflow-y-auto pr-1">
+            {sellForm.items.map((item, index) => {
+              const product = getProductById(item.productId);
+              return (
+                <div key={index} className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                  <div className="flex justify-between items-center mb-3">
+                    <p className="text-xs font-semibold text-slate-500 uppercase">Item {index + 1}</p>
+                    {sellForm.items.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeCartItem(index)}
+                        className="text-slate-400 hover:text-red-500 transition-colors"
+                      >
+                        <X size={16} />
+                      </button>
+                    )}
+                  </div>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Product</label>
+                      <select 
+                        className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-green-500 outline-none bg-white"
+                        value={item.productId}
+                        onChange={e => handleCartItemChange(index, 'productId', e.target.value)}
+                        required
+                      >
+                        <option value="" disabled>-- Select Item --</option>
+                        {products.map(p => (
+                          <option key={p.id} value={p.id} disabled={p.stock <= 0}>
+                            {p.name} (${p.price}) {p.stock <= 0 ? '- OUT OF STOCK' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Quantity</label>
+                      <input 
+                        type="number" 
+                        className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-green-500 outline-none" 
+                        value={item.quantity} 
+                        onChange={e => handleCartItemChange(index, 'quantity', parseInt(e.target.value) || 1)} 
+                        required 
+                        min="1"
+                        max={product?.stock || 99}
+                      />
+                      <p className="text-xs text-slate-400 mt-1 text-right">
+                        Available: {product?.stock || 0}
+                      </p>
+                    </div>
+                    {product && (
+                      <div className="text-xs text-slate-500 bg-white border border-slate-200 rounded-lg px-3 py-2 flex justify-between">
+                        <span>{product.category}</span>
+                        <span className="font-semibold text-slate-800">${(product.price * item.quantity || 0).toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
-          <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Quantity</label>
-            <input 
-              type="number" 
-              className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-green-500 outline-none" 
-              value={sellForm.quantity} 
-              onChange={e => setSellForm({...sellForm, quantity: parseInt(e.target.value) || 1})} 
-              required 
-              min="1"
-              max={products.find(p => p.id == sellForm.productId)?.stock || 99}
-            />
-            <p className="text-xs text-slate-400 mt-1 text-right">
-              Available: {products.find(p => p.id == sellForm.productId)?.stock || 0}
-            </p>
-          </div>
+          <button 
+            type="button" 
+            onClick={addCartItem} 
+            className="w-full border border-dashed border-slate-300 text-slate-600 py-2 rounded-lg text-sm hover:bg-slate-50"
+            disabled={products.length === 0}
+          >
+            + Add another product
+          </button>
 
           <div className="pt-2">
             <button disabled={loading || products.length === 0} className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-lg font-bold shadow-lg transition-transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -474,6 +588,62 @@ export default function App() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* INVOICE DETAIL MODAL */}
+      <Modal title="Invoice Details" isOpen={isInvoiceModalOpen} onClose={closeInvoiceModal}>
+        {invoiceModalLoading && <p className="text-center text-slate-500">Loading invoice...</p>}
+        {!invoiceModalLoading && invoiceDetail && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <p className="text-slate-500 uppercase text-xs font-semibold">Customer</p>
+                <p className="font-medium text-slate-800">{invoiceDetail.customer_name}</p>
+              </div>
+              <div>
+                <p className="text-slate-500 uppercase text-xs font-semibold">Cashier</p>
+                <p className="font-medium text-slate-800">{invoiceDetail.generated_by}</p>
+              </div>
+              <div>
+                <p className="text-slate-500 uppercase text-xs font-semibold">Invoice ID</p>
+                <p className="font-mono text-slate-600">#{invoiceDetail.id}</p>
+              </div>
+              <div>
+                <p className="text-slate-500 uppercase text-xs font-semibold">Date</p>
+                <p className="text-slate-700">{new Date(invoiceDetail.created_at).toLocaleString()}</p>
+              </div>
+            </div>
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-100 text-xs uppercase text-slate-500">
+                  <tr>
+                    <th className="px-4 py-2 text-left">Product</th>
+                    <th className="px-4 py-2 text-center">Qty</th>
+                    <th className="px-4 py-2 text-right">Unit</th>
+                    <th className="px-4 py-2 text-right">Line Total</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {invoiceDetail.items.map(item => (
+                    <tr key={item.id}>
+                      <td className="px-4 py-2 text-slate-700">{item.product_name}</td>
+                      <td className="px-4 py-2 text-center font-semibold text-slate-600">{item.quantity}</td>
+                      <td className="px-4 py-2 text-right font-mono text-slate-500">${item.unit_price.toFixed(2)}</td>
+                      <td className="px-4 py-2 text-right font-mono text-slate-700">${item.line_total.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-between items-center text-lg font-bold text-slate-800">
+              <span>Total</span>
+              <span>${invoiceDetail.total_amount.toFixed(2)}</span>
+            </div>
+          </div>
+        )}
+        {!invoiceModalLoading && !invoiceDetail && (
+          <p className="text-center text-slate-500">Invoice data unavailable.</p>
+        )}
       </Modal>
 
     </div>

@@ -6,7 +6,8 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
-from pydantic import BaseModel
+from pydantic import BaseModel, conint
+from typing import List
 from confluent_kafka import Producer
 import models
 from database import engine, get_db
@@ -56,18 +57,21 @@ def delivery_report(err, msg):
     else:
         print(f'✅ Message delivered to {msg.topic()}')
 
-# --- MODELS ---
+# --- REQUEST MODELS ---
 class ProductCreate(BaseModel):
     name: str
     price: float
     stock: int
     category: str
 
-class AssignRequest(BaseModel):
+class SaleItem(BaseModel):
     product_id: int
+    quantity: conint(gt=0) = 1
+
+class AssignRequest(BaseModel):
     customer_name: str
     user_id: str
-    quantity: int = 1
+    items: List[SaleItem]
 
 # --- ROUTES ---
 @app.post("/products/")
@@ -84,38 +88,64 @@ def read_products(db: Session = Depends(get_db)):
 
 @app.post("/assign/")
 def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
-    product = db.query(models.Product).filter(models.Product.id == request.product_id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Product not found")
-    
-    if product.stock < request.quantity:
-        raise HTTPException(status_code=400, detail=f"Not enough stock. Only {product.stock} available.")
+    if not request.items:
+        raise HTTPException(status_code=400, detail="At least one item is required.")
 
+    product_ids = [item.product_id for item in request.items]
+    products = db.query(models.Product).filter(models.Product.id.in_(product_ids)).all()
+    product_map = {product.id: product for product in products}
+
+    invoice_items = []
+    total_amount = 0
+
+    # Validate availability
+    for item in request.items:
+        product = product_map.get(item.product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product {item.product_id} not found")
+        if product.stock < item.quantity:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough stock for {product.name}. Only {product.stock} available."
+            )
+
+    # Apply stock updates and prepare invoice items
     try:
-        product.stock -= request.quantity
+        for item in request.items:
+            product = product_map[item.product_id]
+            product.stock -= item.quantity
+            line_total = product.price * item.quantity
+            total_amount += line_total
+            invoice_items.append({
+                "product_id": product.id,
+                "product_name": product.name,
+                "unit_price": product.price,
+                "quantity": item.quantity,
+                "line_total": line_total
+            })
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
     if producer:
-        total_amount = product.price * request.quantity
         event = {
-            "product_id": product.id,
-            "product_name": product.name,
-            "unit_price": product.price,
-            "quantity": request.quantity,
-            "total_amount": total_amount,
             "customer_name": request.customer_name,
-            "generated_by": request.user_id
+            "generated_by": request.user_id,
+            "items": invoice_items,
+            "total_amount": total_amount
         }
         producer.produce(
-            'invoices_topic', 
-            key=str(product.id), 
-            value=json.dumps(event), 
+            'invoices_topic',
+            key=request.customer_name,
+            value=json.dumps(event),
             callback=delivery_report
         )
         producer.poll(0)
         producer.flush(timeout=5)
-    
-    return {"message": "Sale processed", "remaining_stock": product.stock}
+
+    return {
+        "message": "Sale processed",
+        "total_amount": total_amount,
+        "items": invoice_items
+    }

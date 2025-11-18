@@ -3,9 +3,9 @@ import json
 import os
 import sys
 import time
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.exc import OperationalError
 from aiokafka import AIOKafkaConsumer
 import models
@@ -40,6 +40,27 @@ app.add_middleware(
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', '')
 
+def serialize_invoice(invoice):
+    return {
+        "id": invoice.id,
+        "customer_name": invoice.customer_name,
+        "total_amount": invoice.total_amount,
+        "generated_by": invoice.generated_by,
+        "created_at": invoice.created_at.isoformat(),
+        "items": [
+            {
+                "id": item.id,
+                "product_id": item.product_id,
+                "product_name": item.product_name,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "line_total": item.line_total
+            } for item in invoice.items
+        ],
+        "item_count": len(invoice.items)
+    }
+
+
 async def consume():
     # Retry loop for Kafka connection
     while True:
@@ -65,14 +86,25 @@ async def consume():
                 db = SessionLocal()
                 invoice = models.Invoice(
                     customer_name=data['customer_name'],
-                    product_name=data['product_name'],
-                    quantity=data.get('quantity', 1),
-                    amount=data.get('total_amount', 0),
+                    total_amount=data.get('total_amount', 0),
                     generated_by=data['generated_by']
                 )
                 db.add(invoice)
+                db.flush()
+
+                for item in data.get('items', []):
+                    invoice_item = models.InvoiceItem(
+                        invoice_id=invoice.id,
+                        product_id=item.get('product_id'),
+                        product_name=item.get('product_name'),
+                        quantity=item.get('quantity', 1),
+                        unit_price=item.get('unit_price', 0),
+                        line_total=item.get('line_total', 0)
+                    )
+                    db.add(invoice_item)
+
                 db.commit()
-                print(f"💾 Invoice: {data['quantity']}x {data['product_name']} for ${data['total_amount']}")
+                print(f"💾 Invoice #{invoice.id}: {len(data.get('items', []))} items totaling ${data.get('total_amount', 0)}")
                 db.close()
             except Exception as e:
                 print(f"❌ Error processing invoice: {e}")
@@ -85,4 +117,28 @@ async def startup_event():
 
 @app.get("/invoices/")
 def get_invoices(db: Session = Depends(get_db)):
-    return db.query(models.Invoice).order_by(models.Invoice.id.desc()).all()
+    invoices = db.query(models.Invoice).options(selectinload(models.Invoice.items)).order_by(models.Invoice.id.desc()).all()
+    return [
+        {
+            "id": invoice.id,
+            "customer_name": invoice.customer_name,
+            "generated_by": invoice.generated_by,
+            "total_amount": invoice.total_amount,
+            "created_at": invoice.created_at.isoformat(),
+            "item_count": len(invoice.items)
+        }
+        for invoice in invoices
+    ]
+
+
+@app.get("/invoices/{invoice_id}")
+def get_invoice_detail(invoice_id: int, db: Session = Depends(get_db)):
+    invoice = (
+        db.query(models.Invoice)
+        .options(selectinload(models.Invoice.items))
+        .filter(models.Invoice.id == invoice_id)
+        .first()
+    )
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    return serialize_invoice(invoice)
