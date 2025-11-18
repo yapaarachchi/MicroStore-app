@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Shield, ShoppingCart, FileText, LogOut, Plus, Database, Server, X, DollarSign, Package } from 'lucide-react';
+import { User, Shield, ShoppingCart, FileText, LogOut, Plus, Database, Server, X, DollarSign, Package, MoreHorizontal } from 'lucide-react';
 
 // API CONFIGURATION
 const INVENTORY_API = "http://localhost:8000";
@@ -76,13 +76,33 @@ export default function App() {
   // Modal States
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isSellModalOpen, setIsSellModalOpen] = useState(false);
+  const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
 
   // Forms State
   const [addProductForm, setAddProductForm] = useState({ name: '', price: '', stock: '', category: 'Vegetables' });
   const [sellForm, setSellForm] = useState({ customerName: '', items: [{ productId: '', quantity: 1 }] });
+  const [restockForm, setRestockForm] = useState({ quantity: 1, notes: '' });
   const [invoiceDetail, setInvoiceDetail] = useState(null);
   const [isInvoiceModalOpen, setIsInvoiceModalOpen] = useState(false);
   const [invoiceModalLoading, setInvoiceModalLoading] = useState(false);
+  const [restockProduct, setRestockProduct] = useState(null);
+  const [restockLoading, setRestockLoading] = useState(false);
+  const [historyProduct, setHistoryProduct] = useState(null);
+  const [stockHistory, setStockHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [openActionMenu, setOpenActionMenu] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [seedStatus, setSeedStatus] = useState({ status: 'idle', last_error: null });
+  const [seedLoading, setSeedLoading] = useState(false);
+
+  const showToast = (message, type = 'info', duration = 3500) => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(toast => toast.id !== id));
+    }, duration);
+  };
 
   // --- API CALLS ---
 
@@ -106,10 +126,25 @@ export default function App() {
     }
   };
 
+  const fetchSeedStatus = async () => {
+    try {
+      const res = await fetch(`${INVENTORY_API}/admin/seed/status`);
+      if (!res.ok) throw new Error("Unable to get seed status");
+      const data = await res.json();
+      setSeedStatus(data);
+    } catch (err) {
+      console.error(err);
+      showToast("Unable to check seed status", "error");
+    }
+  };
+
   useEffect(() => {
     if (user) {
       fetchProducts();
       if (activeTab === 'invoices') fetchInvoices();
+      if (user.role === 'Admin') {
+        fetchSeedStatus();
+      }
     }
   }, [user, activeTab]);
 
@@ -152,6 +187,90 @@ export default function App() {
     });
   };
 
+  const handleSeedDemo = async () => {
+    setSeedLoading(true);
+    try {
+      const res = await fetch(`${INVENTORY_API}/admin/seed/run`, {
+        method: 'POST'
+      });
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Unable to start seeding");
+      }
+      showToast("Seeding started. This may take a minute.", "info");
+      await fetchSeedStatus();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+    setSeedLoading(false);
+  };
+
+  const openRestockModal = (product) => {
+    setRestockProduct(product);
+    setRestockForm({ quantity: 1, notes: '' });
+    setIsRestockModalOpen(true);
+  };
+
+  const handleRestockSubmit = async (e) => {
+    e.preventDefault();
+    if (!restockProduct) return;
+    const quantity = parseInt(restockForm.quantity);
+    if (!quantity || quantity <= 0) {
+      showToast("Quantity must be greater than zero", "warning");
+      return;
+    }
+
+    setRestockLoading(true);
+    try {
+      const payload = {
+        quantity,
+        user_id: user.name,
+        notes: restockForm.notes || null
+      };
+      const res = await fetch(`${INVENTORY_API}/products/${restockProduct.id}/restock/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Failed to restock");
+      }
+      await fetchProducts();
+      showToast(`Added ${quantity} units to ${restockProduct.name}`, "success");
+      setIsRestockModalOpen(false);
+    } catch (err) {
+      showToast(`Restock failed: ${err.message}`, "error");
+    }
+    setRestockLoading(false);
+  };
+
+  const openHistoryModal = async (product) => {
+    setHistoryProduct(product);
+    setIsHistoryModalOpen(true);
+    setHistoryLoading(true);
+    setStockHistory([]);
+    try {
+      const res = await fetch(`${INVENTORY_API}/products/${product.id}/stock-history/`);
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || "Unable to load history");
+      }
+      const data = await res.json();
+      setStockHistory(data);
+    } catch (err) {
+      showToast(`Failed to load history: ${err.message}`, "error");
+      setIsHistoryModalOpen(false);
+    }
+    setHistoryLoading(false);
+  };
+
+  const closeHistoryModal = () => {
+    setIsHistoryModalOpen(false);
+    setHistoryProduct(null);
+    setStockHistory([]);
+  };
+
   // --- HANDLERS ---
 
   const handleLogout = () => {
@@ -163,9 +282,24 @@ export default function App() {
     e.preventDefault();
     setLoading(true);
     try {
+      const trimmedName = addProductForm.name.trim();
+      if (!trimmedName) {
+        showToast("Item name is required", "warning");
+        setLoading(false);
+        return;
+      }
+      const duplicate = products.some(
+        p => p.name.toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (duplicate) {
+        showToast("This item name already exists", "warning");
+        setLoading(false);
+        return;
+      }
+
       // FIX: Ensure numbers are sent as numbers, not strings
       const payload = {
-        name: addProductForm.name,
+        name: trimmedName,
         category: addProductForm.category,
         price: parseFloat(addProductForm.price),
         stock: parseInt(addProductForm.stock)
@@ -185,17 +319,20 @@ export default function App() {
       setAddProductForm({ name: '', price: '', stock: '', category: 'Vegetables' });
       setIsAddModalOpen(false);
       fetchProducts();
-      alert("Product Added Successfully");
+      showToast("Product added successfully", "success");
     } catch (err) {
       console.error(err);
-      alert(`Failed to add product: ${err.message}`);
+      showToast(`Failed to add product: ${err.message}`, "error");
     }
     setLoading(false);
   };
 
   const handleSellSubmit = async (e) => {
     e.preventDefault();
-    if (!sellForm.customerName) return alert("Please enter customer name");
+    if (!sellForm.customerName) {
+      showToast("Please enter a customer name", "warning");
+      return;
+    }
 
     const payloadItems = sellForm.items
       .filter(item => item.productId)
@@ -205,7 +342,8 @@ export default function App() {
       }));
 
     if (payloadItems.length === 0) {
-      return alert("Please select at least one product");
+      showToast("Add at least one product to the cart", "warning");
+      return;
     }
 
     setLoading(true);
@@ -227,13 +365,13 @@ export default function App() {
         throw new Error(errorData.detail || "Transaction failed");
       }
 
-      alert(`Sold ${payloadItems.length} items to ${sellForm.customerName}! Invoice generated.`);
+      showToast(`Sale completed for ${sellForm.customerName}`, "success");
       setSellForm({ customerName: '', items: [{ productId: products[0]?.id || '', quantity: 1 }] });
       setIsSellModalOpen(false);
       fetchProducts(); // Refresh stock
       if (activeTab === 'invoices') fetchInvoices();
     } catch (err) {
-      alert(`Error processing sale: ${err.message}`);
+      showToast(`Error processing sale: ${err.message}`, "error");
     }
     setLoading(false);
   };
@@ -251,7 +389,7 @@ export default function App() {
       const data = await res.json();
       setInvoiceDetail(data);
     } catch (err) {
-      alert(`Unable to load invoice: ${err.message}`);
+      showToast(`Unable to load invoice: ${err.message}`, "error");
       setIsInvoiceModalOpen(false);
     } finally {
       setInvoiceModalLoading(false);
@@ -262,6 +400,24 @@ export default function App() {
     setIsInvoiceModalOpen(false);
     setInvoiceDetail(null);
   };
+
+  useEffect(() => {
+    const closeMenu = (event) => {
+      if (event.defaultPrevented) return;
+      setOpenActionMenu(null);
+    };
+    window.addEventListener('click', closeMenu);
+    return () => window.removeEventListener('click', closeMenu);
+  }, []);
+
+  useEffect(() => {
+    if (user?.role !== 'Admin') return;
+    if (seedStatus.status !== 'running') return;
+    const interval = setInterval(() => {
+      fetchSeedStatus();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [seedStatus.status, user]);
 
   if (!user) return <Login onLogin={setUser} />;
 
@@ -329,6 +485,29 @@ export default function App() {
                   </button>
                 )}
 
+                  {/* SEED DEMO DATA BUTTON (ADMIN ONLY) */}
+                  {user.role === 'Admin' && (
+                    <button
+                      onClick={handleSeedDemo}
+                      disabled={seedLoading || seedStatus.status === 'running' || seedStatus.status === 'completed'}
+                      className={`flex items-center space-x-2 px-4 py-2.5 rounded-lg shadow-md border transition-all ${
+                        seedStatus.status === 'completed'
+                          ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                          : seedStatus.status === 'running'
+                          ? 'bg-amber-100 text-amber-700 cursor-wait'
+                          : 'bg-white text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="font-medium text-sm">
+                        {seedStatus.status === 'completed'
+                          ? 'Demo Data Seeded'
+                          : seedStatus.status === 'running'
+                          ? 'Seeding...'
+                          : 'Seed Demo Data'}
+                      </span>
+                    </button>
+                  )}
+
                 {/* SELL PRODUCT BUTTON (ALL USERS) */}
                 <button 
                   onClick={() => setIsSellModalOpen(true)}
@@ -339,6 +518,9 @@ export default function App() {
                 </button>
               </div>
             </div>
+            {user.role === 'Admin' && seedStatus.last_error && (
+              <p className="text-sm text-red-500">Seed failed: {seedStatus.last_error}</p>
+            )}
 
             {/* Data Table */}
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -350,6 +532,8 @@ export default function App() {
                     <th className="px-6 py-4 font-semibold">Category</th>
                     <th className="px-6 py-4 font-semibold text-right">Unit Price</th>
                     <th className="px-6 py-4 font-semibold text-center">Stock</th>
+                    <th className="px-6 py-4 font-semibold text-right">Updated</th>
+                    <th className="px-6 py-4 font-semibold text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -374,6 +558,51 @@ export default function App() {
                         <span className={`px-3 py-1 rounded-full text-xs font-bold ${p.stock > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
                           {p.stock}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 text-right text-slate-500 text-xs">
+                        {p.updated_at ? new Date(p.updated_at).toLocaleString() : '—'}
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="relative flex justify-end">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenActionMenu(openActionMenu === p.id ? null : p.id);
+                            }}
+                            className="p-2 rounded-full hover:bg-slate-100 text-slate-500"
+                          >
+                            <MoreHorizontal size={18} />
+                          </button>
+                          {openActionMenu === p.id && (
+                            <div 
+                              className="absolute right-0 mt-2 w-40 bg-white border border-slate-200 rounded-lg shadow-lg z-10"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openHistoryModal(p);
+                                  setOpenActionMenu(null);
+                                }}
+                                className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                              >
+                                View History
+                              </button>
+                              {user.role === 'Admin' && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openRestockModal(p);
+                                    setOpenActionMenu(null);
+                                  }}
+                                  className="w-full text-left px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                                >
+                                  Restock
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -590,6 +819,94 @@ export default function App() {
         </form>
       </Modal>
 
+      {/* RESTOCK MODAL */}
+      <Modal 
+        title={restockProduct ? `Restock ${restockProduct.name}` : "Restock"} 
+        isOpen={isRestockModalOpen} 
+        onClose={() => setIsRestockModalOpen(false)}
+      >
+        <form onSubmit={handleRestockSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Quantity to Add</label>
+            <input 
+              type="number"
+              min="1"
+              className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+              value={restockForm.quantity}
+              onChange={e => setRestockForm(prev => ({ ...prev, quantity: e.target.value }))}
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notes (optional)</label>
+            <textarea
+              className="w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+              rows="3"
+              value={restockForm.notes}
+              onChange={e => setRestockForm(prev => ({ ...prev, notes: e.target.value }))}
+              placeholder="e.g. Supplier delivery batch #42"
+            />
+          </div>
+          <div className="pt-2">
+            <button
+              type="submit"
+              disabled={restockLoading}
+              className="w-full bg-amber-400 hover:bg-amber-500 text-black py-3 rounded-lg font-semibold text-sm tracking-wide shadow-lg transition-transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {restockLoading ? 'Updating…' : 'Confirm Restock'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* STOCK HISTORY MODAL */}
+      <Modal 
+        title={historyProduct ? `Stock History • ${historyProduct.name}` : "Stock History"} 
+        isOpen={isHistoryModalOpen} 
+        onClose={closeHistoryModal}
+      >
+        {historyLoading && <p className="text-center text-slate-500">Loading history...</p>}
+        {!historyLoading && stockHistory.length === 0 && (
+          <p className="text-center text-slate-400">No history records yet.</p>
+        )}
+        {!historyLoading && stockHistory.length > 0 && (
+          <div className="max-h-96 overflow-y-auto border border-slate-200 rounded-lg">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-100 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-4 py-2 text-left">When</th>
+                  <th className="px-4 py-2 text-left">Type</th>
+                  <th className="px-4 py-2 text-center">Δ Qty</th>
+                  <th className="px-4 py-2 text-center">Stock</th>
+                  <th className="px-4 py-2 text-left">By</th>
+                  <th className="px-4 py-2 text-left">Notes</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {stockHistory.map(entry => (
+                  <tr key={entry.id}>
+                    <td className="px-4 py-2 text-slate-600 text-xs">
+                      {entry.created_at ? new Date(entry.created_at).toLocaleString() : '—'}
+                    </td>
+                    <td className="px-4 py-2 capitalize font-semibold text-slate-700">
+                      {entry.change_type}
+                    </td>
+                    <td className={`px-4 py-2 text-center font-mono ${entry.quantity_delta >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {entry.quantity_delta > 0 ? `+${entry.quantity_delta}` : entry.quantity_delta}
+                    </td>
+                    <td className="px-4 py-2 text-center text-slate-600 text-xs">
+                      {entry.previous_stock} → {entry.new_stock}
+                    </td>
+                    <td className="px-4 py-2 text-slate-500 text-xs">{entry.created_by || '—'}</td>
+                    <td className="px-4 py-2 text-slate-600 text-xs">{entry.notes || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Modal>
+
       {/* INVOICE DETAIL MODAL */}
       <Modal title="Invoice Details" isOpen={isInvoiceModalOpen} onClose={closeInvoiceModal}>
         {invoiceModalLoading && <p className="text-center text-slate-500">Loading invoice...</p>}
@@ -645,6 +962,26 @@ export default function App() {
           <p className="text-center text-slate-500">Invoice data unavailable.</p>
         )}
       </Modal>
+
+      {/* TOASTS */}
+      <div className="fixed bottom-4 right-4 space-y-3 z-50">
+        {toasts.map(toast => {
+          const palette = {
+            success: 'bg-green-600 text-white border border-green-500',
+            error: 'bg-red-600 text-white border border-red-500',
+            warning: 'bg-amber-400 text-slate-900 border border-amber-500',
+            info: 'bg-slate-700 text-white border border-slate-600'
+          };
+          return (
+            <div
+              key={toast.id}
+              className={`px-4 py-3 rounded-lg shadow-lg text-sm font-semibold tracking-wide ${palette[toast.type] ?? palette.info}`}
+            >
+              {toast.message}
+            </div>
+          );
+        })}
+      </div>
 
     </div>
   );
