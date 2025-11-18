@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Shield, ShoppingCart, FileText, LogOut, Plus, Database, Server, X, DollarSign, Package, MoreHorizontal } from 'lucide-react';
+import { User, Shield, ShoppingCart, FileText, LogOut, Plus, Database, Server, X, DollarSign, Package, MoreHorizontal, ChevronLeft, ChevronRight } from 'lucide-react';
 
 // API CONFIGURATION
 const INVENTORY_API = "http://localhost:8000";
@@ -22,6 +22,84 @@ const Modal = ({ title, isOpen, onClose, children }) => {
           {children}
         </div>
       </div>
+    </div>
+  );
+};
+
+const Pagination = ({ currentPage, totalPages, onPageChange, total }) => {
+  if (!total || total === 0) return null;
+  
+  const pages = [];
+  const maxVisible = 5;
+  let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
+  let endPage = Math.min(totalPages, startPage + maxVisible - 1);
+  
+  if (endPage - startPage < maxVisible - 1) {
+    startPage = Math.max(1, endPage - maxVisible + 1);
+  }
+  
+  for (let i = startPage; i <= endPage; i++) {
+    pages.push(i);
+  }
+  
+  return (
+    <div className="flex items-center justify-between px-6 py-4 border-t border-slate-200 bg-white">
+      <div className="text-sm text-slate-600 font-medium">
+        Showing page {currentPage} of {totalPages} ({total} total items)
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center space-x-2">
+          <button
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={currentPage === 1}
+            className="p-2 rounded-md border border-slate-300 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronLeft size={16} />
+          </button>
+          {startPage > 1 && (
+            <>
+              <button
+                onClick={() => onPageChange(1)}
+                className="px-3 py-1 rounded-md border border-slate-300 hover:bg-slate-100 transition-colors"
+              >
+                1
+              </button>
+              {startPage > 2 && <span className="px-2 text-slate-400">...</span>}
+            </>
+          )}
+          {pages.map(page => (
+            <button
+              key={page}
+              onClick={() => onPageChange(page)}
+              className={`px-3 py-1 rounded-md border transition-colors ${
+                page === currentPage
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'border-slate-300 hover:bg-slate-100'
+              }`}
+            >
+              {page}
+            </button>
+          ))}
+          {endPage < totalPages && (
+            <>
+              {endPage < totalPages - 1 && <span className="px-2 text-slate-400">...</span>}
+              <button
+                onClick={() => onPageChange(totalPages)}
+                className="px-3 py-1 rounded-md border border-slate-300 hover:bg-slate-100 transition-colors"
+              >
+                {totalPages}
+              </button>
+            </>
+          )}
+          <button
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={currentPage === totalPages}
+            className="p-2 rounded-md border border-slate-300 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };
@@ -72,6 +150,12 @@ export default function App() {
   const [invoices, setInvoices] = useState([]);
   const [activeTab, setActiveTab] = useState('inventory');
   const [loading, setLoading] = useState(false);
+  
+  // Pagination state
+  const [productsPage, setProductsPage] = useState(1);
+  const [productsPagination, setProductsPagination] = useState({ total: 0, total_pages: 1, page: 1 });
+  const [invoicesPage, setInvoicesPage] = useState(1);
+  const [invoicesPagination, setInvoicesPagination] = useState({ total: 0, total_pages: 1, page: 1 });
 
   // Modal States
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -106,21 +190,57 @@ export default function App() {
 
   // --- API CALLS ---
 
-  const fetchProducts = async () => {
+  const fetchProducts = async (page = productsPage) => {
     try {
-      const res = await fetch(`${INVENTORY_API}/products/`);
+      const res = await fetch(`${INVENTORY_API}/products/?page=${page}&page_size=50`);
       const data = await res.json();
-      setProducts(data);
+      if (data.items) {
+        setProducts(data.items);
+        setProductsPagination({
+          total: data.total || 0,
+          total_pages: data.total_pages || 1,
+          page: data.page || 1
+        });
+        setProductsPage(data.page || 1);
+      } else {
+        // Fallback for old API format
+        const items = Array.isArray(data) ? data : [];
+        setProducts(items);
+        setProductsPagination({
+          total: items.length,
+          total_pages: 1,
+          page: 1
+        });
+        setProductsPage(1);
+      }
     } catch (err) {
       console.error("Failed to fetch inventory", err);
     }
   };
 
-  const fetchInvoices = async () => {
+  const fetchInvoices = async (page = invoicesPage) => {
     try {
-      const res = await fetch(`${BILLING_API}/invoices/`);
+      const res = await fetch(`${BILLING_API}/invoices/?page=${page}&page_size=50`);
       const data = await res.json();
-      setInvoices(data);
+      if (data.items) {
+        setInvoices(data.items);
+        setInvoicesPagination({
+          total: data.total || 0,
+          total_pages: data.total_pages || 1,
+          page: data.page || 1
+        });
+        setInvoicesPage(data.page || 1);
+      } else {
+        // Fallback for old API format
+        const items = Array.isArray(data) ? data : [];
+        setInvoices(items);
+        setInvoicesPagination({
+          total: items.length,
+          total_pages: 1,
+          page: 1
+        });
+        setInvoicesPage(1);
+      }
     } catch (err) {
       console.error("Failed to fetch invoices", err);
     }
@@ -153,7 +273,12 @@ export default function App() {
   useEffect(() => {
     if (user) {
       fetchProducts();
-      if (activeTab === 'invoices') fetchInvoices();
+      // Redirect non-admins away from invoices tab
+      if (activeTab === 'invoices' && user.role !== 'Admin') {
+        setActiveTab('inventory');
+      } else if (activeTab === 'invoices') {
+        fetchInvoices();
+      }
       if (user.role === 'Admin') {
         fetchSeedStatus();
       }
@@ -448,7 +573,7 @@ export default function App() {
           <div className="flex items-center space-x-6">
             <div className="flex items-center space-x-2 bg-slate-800 px-3 py-1 rounded-full">
               {user.role === 'Admin' ? <Shield size={16} className="text-yellow-400" /> : <User size={16} className="text-green-400" />}
-              <span className="text-sm font-medium">{user.name}</span>
+              <span className="text-sm font-medium capitalize">{user.name || 'User'}</span>
             </div>
             <button 
               onClick={handleLogout} 
@@ -470,12 +595,14 @@ export default function App() {
           >
             <ShoppingCart size={16} /><span>Inventory Management</span>
           </button>
-          <button 
-            onClick={() => setActiveTab('invoices')} 
-            className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center space-x-2 ${activeTab === 'invoices' ? 'bg-blue-50 text-blue-600 shadow-sm ring-1 ring-blue-200' : 'text-slate-500 hover:text-slate-700'}`}
-          >
-            <FileText size={16} /><span>Billing History</span>
-          </button>
+          {user.role === 'Admin' && (
+            <button 
+              onClick={() => setActiveTab('invoices')} 
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center space-x-2 ${activeTab === 'invoices' ? 'bg-blue-50 text-blue-600 shadow-sm ring-1 ring-blue-200' : 'text-slate-500 hover:text-slate-700'}`}
+            >
+              <FileText size={16} /><span>Billing History</span>
+            </button>
+          )}
         </div>
 
         {/* INVENTORY TAB */}
@@ -628,11 +755,20 @@ export default function App() {
                 </tbody>
               </table>
             </div>
+            <Pagination
+              currentPage={productsPagination.page}
+              totalPages={productsPagination.total_pages}
+              total={productsPagination.total}
+              onPageChange={(page) => {
+                setProductsPage(page);
+                fetchProducts(page);
+              }}
+            />
           </div>
         )}
 
         {/* INVOICES TAB */}
-        {activeTab === 'invoices' && (
+        {activeTab === 'invoices' && user.role === 'Admin' && (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
              <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 className="font-bold text-slate-700">Sales History</h3>
@@ -667,6 +803,15 @@ export default function App() {
                   {invoices.length === 0 && <tr><td colSpan="6" className="text-center py-12 text-slate-400">No invoices found.</td></tr>}
                 </tbody>
               </table>
+              <Pagination
+                currentPage={invoicesPagination.page}
+                totalPages={invoicesPagination.total_pages}
+                total={invoicesPagination.total}
+                onPageChange={(page) => {
+                  setInvoicesPage(page);
+                  fetchInvoices(page);
+                }}
+              />
           </div>
         )}
       </main>
@@ -872,52 +1017,62 @@ export default function App() {
       </Modal>
 
       {/* STOCK HISTORY MODAL */}
-      <Modal 
-        title={historyProduct ? `Stock History • ${historyProduct.name}` : "Stock History"} 
-        isOpen={isHistoryModalOpen} 
-        onClose={closeHistoryModal}
-      >
-        {historyLoading && <p className="text-center text-slate-500">Loading history...</p>}
-        {!historyLoading && stockHistory.length === 0 && (
-          <p className="text-center text-slate-400">No history records yet.</p>
-        )}
-        {!historyLoading && stockHistory.length > 0 && (
-          <div className="max-h-96 overflow-y-auto border border-slate-200 rounded-lg">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-100 text-xs uppercase text-slate-500">
-                <tr>
-                  <th className="px-4 py-2 text-left">When</th>
-                  <th className="px-4 py-2 text-left">Type</th>
-                  <th className="px-4 py-2 text-center">Δ Qty</th>
-                  <th className="px-4 py-2 text-center">Stock</th>
-                  <th className="px-4 py-2 text-left">By</th>
-                  <th className="px-4 py-2 text-left">Notes</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {stockHistory.map(entry => (
-                  <tr key={entry.id}>
-                    <td className="px-4 py-2 text-slate-600 text-xs">
-                      {entry.created_at ? new Date(entry.created_at).toLocaleString() : '—'}
-                    </td>
-                    <td className="px-4 py-2 capitalize font-semibold text-slate-700">
-                      {entry.change_type}
-                    </td>
-                    <td className={`px-4 py-2 text-center font-mono ${entry.quantity_delta >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                      {entry.quantity_delta > 0 ? `+${entry.quantity_delta}` : entry.quantity_delta}
-                    </td>
-                    <td className="px-4 py-2 text-center text-slate-600 text-xs">
-                      {entry.previous_stock} → {entry.new_stock}
-                    </td>
-                    <td className="px-4 py-2 text-slate-500 text-xs">{entry.created_by || '—'}</td>
-                    <td className="px-4 py-2 text-slate-600 text-xs">{entry.notes || '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {isHistoryModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 px-4 py-8" onClick={closeHistoryModal}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col" style={{ maxHeight: '85vh' }} onClick={(e) => e.stopPropagation()}>
+            <div className="bg-slate-900 px-6 py-4 flex justify-between items-center flex-shrink-0">
+              <h3 className="text-white font-bold text-lg">{historyProduct ? `Stock History • ${historyProduct.name}` : "Stock History"}</h3>
+              <button onClick={closeHistoryModal} className="text-slate-400 hover:text-white transition-colors z-10">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto" style={{ maxHeight: 'calc(85vh - 80px)' }}>
+              {historyLoading && <p className="text-center text-slate-500">Loading history...</p>}
+              {!historyLoading && stockHistory.length === 0 && (
+                <p className="text-center text-slate-400">No history records yet.</p>
+              )}
+              {!historyLoading && stockHistory.length > 0 && (
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-100 text-xs uppercase text-slate-500">
+                        <tr>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">When</th>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">Type</th>
+                          <th className="px-4 py-2 text-center sticky top-0 bg-slate-100">Δ Qty</th>
+                          <th className="px-4 py-2 text-center sticky top-0 bg-slate-100">Stock</th>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">By</th>
+                          <th className="px-4 py-2 text-left sticky top-0 bg-slate-100">Notes</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {stockHistory.map(entry => (
+                          <tr key={entry.id}>
+                            <td className="px-4 py-2 text-slate-600 text-xs">
+                              {entry.created_at ? new Date(entry.created_at).toLocaleString() : '—'}
+                            </td>
+                            <td className="px-4 py-2 capitalize font-semibold text-slate-700">
+                              {entry.change_type}
+                            </td>
+                            <td className={`px-4 py-2 text-center font-mono ${entry.quantity_delta >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {entry.quantity_delta > 0 ? `+${entry.quantity_delta}` : entry.quantity_delta}
+                            </td>
+                            <td className="px-4 py-2 text-center text-slate-600 text-xs">
+                              {entry.previous_stock} → {entry.new_stock}
+                            </td>
+                            <td className="px-4 py-2 text-slate-500 text-xs">{entry.created_by || '—'}</td>
+                            <td className="px-4 py-2 text-slate-600 text-xs">{entry.notes || '—'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-        )}
-      </Modal>
+        </div>
+      )}
 
       {/* INVOICE DETAIL MODAL */}
       <Modal title="Invoice Details" isOpen={isInvoiceModalOpen} onClose={closeInvoiceModal}>

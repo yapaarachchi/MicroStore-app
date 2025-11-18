@@ -116,19 +116,40 @@ async def startup_event():
     asyncio.create_task(consume())
 
 @app.get("/invoices/")
-def get_invoices(db: Session = Depends(get_db)):
-    invoices = db.query(models.Invoice).options(selectinload(models.Invoice.items)).order_by(models.Invoice.id.desc()).all()
-    return [
-        {
-            "id": invoice.id,
-            "customer_name": invoice.customer_name,
-            "generated_by": invoice.generated_by,
-            "total_amount": invoice.total_amount,
-            "created_at": invoice.created_at.isoformat(),
-            "item_count": len(invoice.items)
-        }
-        for invoice in invoices
-    ]
+def get_invoices(page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 100:
+        page_size = 50
+    
+    offset = (page - 1) * page_size
+    total = db.query(models.Invoice).count()
+    invoices = (
+        db.query(models.Invoice)
+        .options(selectinload(models.Invoice.items))
+        .order_by(models.Invoice.id.desc())
+        .offset(offset)
+        .limit(page_size)
+        .all()
+    )
+    
+    return {
+        "items": [
+            {
+                "id": invoice.id,
+                "customer_name": invoice.customer_name,
+                "generated_by": invoice.generated_by,
+                "total_amount": invoice.total_amount,
+                "created_at": invoice.created_at.isoformat(),
+                "item_count": len(invoice.items)
+            }
+            for invoice in invoices
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size
+    }
 
 
 @app.get("/invoices/{invoice_id}")

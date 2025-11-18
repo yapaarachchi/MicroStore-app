@@ -167,7 +167,7 @@ def build_catalog(year: int) -> Tuple[List[Dict], List[Dict]]:
         used_names.add(name)
 
         price = round(random.uniform(base_prices[category] * 0.8, base_prices[category] * 1.4), 2)
-        initial_stock = random.randint(180, 420)
+        initial_stock = random.randint(250, 500)
         created_at = random_datetime_between(start_window, end_window)
 
         product = {
@@ -222,6 +222,11 @@ def simulate_year(
     ]
     cashiers = ["admin", "cassie", "noah", "liam", "ava", "mason", "zoe", "mia"]
 
+    # Reset all products to their initial stock for simulation
+    # (Final values will be recalculated based on chronological movements)
+    for product in products:
+        product["current_stock"] = product["initial_stock"]
+
     invoice_rows: List[Dict] = []
     invoice_item_rows: List[Dict] = []
     movement_rows: List[Dict] = []
@@ -235,7 +240,7 @@ def simulate_year(
         day_end = dt.datetime.combine(day, dt.time.max)
 
         # Morning restocks for low inventory items
-        low_stock_products = [p for p in products if p["current_stock"] < 60]
+        low_stock_products = [p for p in products if p["current_stock"] < 100]
         restock_candidates = random.sample(
             low_stock_products, k=min(len(low_stock_products), random.randint(3, 10)) or 0
         )
@@ -269,13 +274,10 @@ def simulate_year(
             while len(selected_items) < cart_size and attempts < 10:
                 product = random.choice(products)
                 available = product["current_stock"]
-                if available <= 2:
+                if available == 0:
                     attempts += 1
                     continue
                 qty = random.randint(1, min(5, available))
-                if qty == 0:
-                    attempts += 1
-                    continue
                 selected_items.append((product, qty))
                 attempts += 1
 
@@ -365,6 +367,65 @@ def reset_tables(inv_conn, bill_conn):
     bill_conn.execute(text("TRUNCATE TABLE invoices RESTART IDENTITY CASCADE"))
 
 
+def recalculate_stock_from_movements(
+    products: List[Dict],
+    movement_rows: List[Dict],
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Recalculate stock values based on chronological order of movements.
+    Ensures previous_stock and new_stock are correct for each movement.
+    """
+    # Group movements by product_id
+    movements_by_product: Dict[int, List[Dict]] = {}
+    for movement in movement_rows:
+        product_id = movement["product_id"]
+        if product_id not in movements_by_product:
+            movements_by_product[product_id] = []
+        movements_by_product[product_id].append(movement)
+    
+    # Recalculate stock for each product
+    recalculated_movements = []
+    product_stock_map = {}  # Track final stock for each product
+    
+    for product in products:
+        product_id = product["id"]
+        product_movements = movements_by_product.get(product_id, [])
+        
+        # Sort movements by date (oldest first), then by type (initial, restock, sale)
+        type_order = {"initial": 0, "restock": 1, "sale": 2}
+        product_movements.sort(key=lambda x: (x["created_at"], type_order.get(x["change_type"], 99)))
+        
+        current_stock = 0  # Always start from 0
+        
+        for movement in product_movements:
+            # Set previous_stock to current stock
+            movement["previous_stock"] = current_stock
+            
+            # Apply the delta
+            current_stock += movement["quantity_delta"]
+            
+            # Ensure stock never goes negative
+            if current_stock < 0:
+                print(f"[WARN] Product {product_id} stock would go negative ({current_stock}), adjusting...")
+                # Adjust the movement to prevent negative stock
+                movement["quantity_delta"] = movement["quantity_delta"] + (0 - current_stock)
+                current_stock = 0
+            
+            # Set new_stock
+            movement["new_stock"] = current_stock
+
+            # Only append movements if they have a non-zero quantity_delta,
+            # or if they are not of type 'sale' (initial and restock can have 0 delta if adjusted)
+            if not (movement["change_type"] == "sale" and movement["quantity_delta"] == 0):
+                recalculated_movements.append(movement)
+        
+        # Update product's final stock
+        product["current_stock"] = current_stock
+        product_stock_map[product_id] = current_stock
+    
+    return recalculated_movements, product_stock_map
+
+
 def reset_sequences(conn, table_name: str):
     conn.execute(
         text(
@@ -396,11 +457,55 @@ def run_seed(
 
     print(f"[INFO] Seeding data for calendar year {target_year}")
     products, initial_movements = build_catalog(target_year)
+    
+    # Validate: ensure we have initial movements for all products
+    product_ids = {p["id"] for p in products}
+    initial_product_ids = {m["product_id"] for m in initial_movements}
+    missing_initial = product_ids - initial_product_ids
+    if missing_initial:
+        print(f"[WARN] Missing initial movements for {len(missing_initial)} products. Creating them...")
+        for product_id in missing_initial:
+            product = next(p for p in products if p["id"] == product_id)
+            initial_movements.append({
+                "product_id": product_id,
+                "change_type": "initial",
+                "quantity_delta": product["initial_stock"],
+                "previous_stock": 0,
+                "new_stock": product["initial_stock"],
+                "notes": "Initial catalog load",
+                "created_by": "system-seed",
+                "created_at": product["created_at"],
+            })
+    
     invoice_rows, invoice_item_rows, activity_movements = simulate_year(
         products, start_date, end_date
     )
+    
+    # Combine all movements
+    all_movements = initial_movements + activity_movements
+    
+    # Recalculate stock values based on chronological order
+    print("[INFO] Recalculating stock values based on chronological movement order...")
+    recalculated_movements, product_stock_map = recalculate_stock_from_movements(
+        products, all_movements
+    )
+    
+    # Update products with final stock values
+    for product in products:
+        product["current_stock"] = product_stock_map.get(product["id"], product.get("initial_stock", 0))
+        # Update updated_at to the last movement's timestamp
+        product_movements = [m for m in recalculated_movements if m["product_id"] == product["id"]]
+        if product_movements:
+            product["updated_at"] = max(m["created_at"] for m in product_movements)
+    
     product_rows = product_rows_for_insert(products)
-    movement_rows = initial_movements + activity_movements
+    movement_rows = recalculated_movements
+    
+    # Log movement breakdown
+    initial_count = sum(1 for m in movement_rows if m["change_type"] == "initial")
+    restock_count = sum(1 for m in movement_rows if m["change_type"] == "restock")
+    sale_count = sum(1 for m in movement_rows if m["change_type"] == "sale")
+    print(f"[INFO] Movement breakdown: {initial_count} initial, {restock_count} restocks, {sale_count} sales")
 
     with inventory_engine.begin() as inv_conn, billing_engine.begin() as bill_conn:
         reset_tables(inv_conn, bill_conn)

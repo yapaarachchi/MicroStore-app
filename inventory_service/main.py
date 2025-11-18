@@ -37,6 +37,16 @@ except ImportError:
         print(f"   Current sys.path: {sys.path[:3]}...", file=sys.stderr)
         seed_databases = None
 
+# Database URLs for seeding task
+INVENTORY_SEED_DB_URL = os.getenv(
+    "INVENTORY_DATABASE_URL",
+    os.getenv("DATABASE_URL", "postgresql://admin:password123@localhost:5432/inventory_db"),
+)
+BILLING_SEED_DB_URL = os.getenv(
+    "BILLING_DATABASE_URL",
+    "postgresql://admin:password123@localhost:5432/billing_db",
+)
+
 # --- DB CONNECTION RETRY LOGIC ---
 def wait_for_db():
     retries = 10
@@ -68,9 +78,6 @@ app.add_middleware(
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', '')
 if not KAFKA_BOOTSTRAP_SERVERS:
     print("WARNING: KAFKA_BOOTSTRAP_SERVERS is not set.")
-
-INVENTORY_SEED_DB_URL = os.getenv("INVENTORY_DATABASE_URL") or os.getenv("DATABASE_URL")
-BILLING_SEED_DB_URL = os.getenv("BILLING_DATABASE_URL", "postgresql://admin:password123@postgres:5432/billing_db")
 
 conf = {'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS, 'client.id': 'inventory-service'}
 try:
@@ -221,9 +228,23 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to create product: {str(e)}")
 
 @app.get("/products/")
-def read_products(db: Session = Depends(get_db)):
-    products = db.query(models.Product).all()
-    return [serialize_product(product) for product in products]
+def read_products(page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 100:
+        page_size = 50
+    
+    offset = (page - 1) * page_size
+    total = db.query(models.Product).count()
+    products = db.query(models.Product).offset(offset).limit(page_size).all()
+    
+    return {
+        "items": [serialize_product(product) for product in products],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size
+    }
 
 
 @app.post("/products/{product_id}/restock/")
@@ -262,14 +283,20 @@ def get_stock_history(product_id: int, limit: int = 25, db: Session = Depends(ge
     if not product_exists:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    movements = (
+    # Get all movements and sort chronologically by datetime (oldest first)
+    # This ensures initial stock appears first, followed by restocks and sales in chronological order
+    all_movements = (
         db.query(models.StockMovement)
         .filter(models.StockMovement.product_id == product_id)
-        .order_by(models.StockMovement.created_at.desc())
-        .limit(limit)
+        .order_by(models.StockMovement.created_at.asc())
         .all()
     )
-    return [serialize_movement(movement) for movement in movements]
+    
+    # Apply limit if specified
+    if limit and limit > 0:
+        all_movements = all_movements[:limit]
+    
+    return [serialize_movement(movement) for movement in all_movements]
 
 @app.post("/assign/")
 def assign_product(request: AssignRequest, db: Session = Depends(get_db)):
